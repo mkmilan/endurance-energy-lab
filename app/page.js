@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { BIKE_UNITS, RUN_UNITS, LIMITS, MILE, clamp, estimate, formatIntensity, initialState, nextIntensity, parseIntensity, restore, thresholdIntensity } from '../lib/model';
+import { BIKE_UNITS, RUN_UNITS, LIMITS, MILE, clamp, estimate, formatIntensity, initialState, nextIntensity, parseGraphIntensity, restore, thresholdIntensity } from '../lib/model';
 import { Field, Icon, Settings } from './Controls';
 import Plot from './Plot';
 
@@ -42,9 +42,11 @@ export default function Page() {
   const units=run?RUN_UNITS:BIKE_UNITS, unit=units[p.unit], intensity= p.intensity;
   const view = (v)=>formatIntensity(v,p.unit,weight);
   const thresholds=['lt1','lt2'].map(key=>({label:key.toUpperCase(),value:thresholdIntensity(sport,p,weight,p[key])}));
-  const validThresholds=thresholds[0].value>0 && thresholds[0].value<thresholds[1].value;
-  const showThresholds=validThresholds?thresholds:[];
-  const zone = !validThresholds?'Check threshold order':intensity<thresholds[0].value?'Zone 1 · Below LT1':intensity<=thresholds[1].value?'Zone 2 · LT1 to LT2':'Zone 3 · Above LT2';
+  const positiveThresholds = thresholds.every(t => t.value > 0);
+  const inOrder = thresholds[0].value < thresholds[1].value;
+  const thresholdError = !positiveThresholds ? 'Threshold below modeled resting demand.' :
+    !inOrder ? 'LT1 must be at a lower intensity than LT2.' : '';
+  const zone = thresholdError?'Check thresholds':intensity<thresholds[0].value?'Zone 1 · Below LT1':intensity<=thresholds[1].value?'Zone 2 · LT1 to LT2':'Zone 3 · Above LT2';
   const pin=pins[sport], pinned=pin!=null?estimate(sport,p,weight,pin):null;
   const oxygenValues = {
     relative: round(data.relative,1)+' mL/kg/min',
@@ -53,7 +55,7 @@ export default function Page() {
   };
   const oxygenDetail = ['percent','relative','absolute'].filter(key=>key!==state.oxygenUnit)
     .map(key=>oxygenValues[key]).join('  ·  ');
-  const graphProps={sport,weight,profile:p,thresholds:showThresholds,pinned:pin,onSelect:select};
+  const graphProps={sport,weight,profile:p,thresholds,pinned:pin,onSelect:select};
   const energyMeasure = v=>estimate(sport,p,weight,v).kcalHour;
   const oxygenMeasure = v=>estimate(sport,p,weight,v)[state.oxygenUnit];
   const oxygenMax=state.oxygenUnit==='absolute'?p.max*weight/1000:state.oxygenUnit==='percent'?100:p.max;
@@ -61,6 +63,13 @@ export default function Page() {
   const extra=run?formatIntensity(intensity,speedUnit==='mph'?'mph':'kmh',weight)+' '+speedUnit:round(intensity/weight,2)+' W/kg';
   const labelX=run?(['paceKm','paceMi'].includes(p.unit)?'Pace':'Speed'):'Power';
   const changePin=(value)=>setPins(current=>({...current,[sport]:value}));
+  function editThreshold(key) {
+    const settings = document.getElementById('threshold-settings');
+    settings.open = true;
+    const field = document.getElementById(key+'-value');
+    field.focus();
+    field.select();
+  }
   return <>
     <header className="mast"><div className="wrap mast-inner"><a className="brand" href="#" aria-label="Endurance Energy Lab home"><img src="/mark.svg" width="35" height="35" alt=""/><span>Endurance <b>Energy Lab</b></span></a>
       <button className="method-btn" onClick={()=>notes.current.showModal()}><Icon name="note"/><span>Model notes</span></button></div></header>
@@ -74,8 +83,8 @@ export default function Page() {
         <button className="phone-settings" onClick={()=>mobileSettings.current.scrollIntoView({behavior:'smooth'})}><Icon name="sliders" size={14}/> Settings</button>
         <button className="pin-button" onClick={()=>changePin(intensity)}><Icon name="pin" size={15}/>{pin==null?'Pin to compare':'Update pin'}</button></div>
         <div className="intensity-main"><div className="pace-edit" key={sport+p.unit}>
-          <Field label={labelX} value={intensity} type="text" display={view(intensity)} min={LIMITS[sport][0]-0.04} max={LIMITS[sport][1]+0.04}
-            parse={v=>parseIntensity(v,p.unit,weight)} hint={'Enter '+view(LIMITS[sport][0])+' to '+view(LIMITS[sport][1])+' '+unit+'.'} onCommit={select}/>
+          <Field label={labelX} value={intensity} type="text" display={view(intensity)} min={LIMITS[sport][0]} max={LIMITS[sport][1]}
+            parse={v=>parseGraphIntensity(v,p.unit,weight,sport)} hint={'Enter '+view(LIMITS[sport][0])+' to '+view(LIMITS[sport][1])+' '+unit+'.'} onCommit={select}/>
           <select aria-label="Intensity unit" value={p.unit} onChange={e=>patch({unit:e.target.value})}>
             {Object.entries(units).map(([key,u])=><option value={key} key={key}>{u}</option>)}</select></div>
           <span className="zone">{zone}</span></div>
@@ -84,6 +93,16 @@ export default function Page() {
           style={{'--progress':((intensity-LIMITS[sport][0])/(LIMITS[sport][1]-LIMITS[sport][0])*100)+'%'}}/>
         <button className="nudge" aria-label="Increase intensity" disabled={intensity>=LIMITS[sport][1]} onClick={()=>select(nextIntensity(sport,p.unit,intensity,1,weight))}>+</button></div>
         <div className="range-labels"><span>{view(LIMITS[sport][0])} {unit}</span><span>{view(LIMITS[sport][1])} {unit}</span></div>
+        <div className="threshold-readouts" aria-label="Graph thresholds">
+          {thresholds.map(({label,value})=>{
+            const [lo,hi] = LIMITS[sport];
+            const position = value < lo ? 'below chart range' : value > hi ? 'above chart range' : '';
+            return <button key={label} aria-label={'Edit '+label+' threshold'} onClick={()=>editThreshold(label.toLowerCase())}>
+              <b>{label}</b> {value > 0 ? view(value)+' '+unit : 'Below resting demand'} {position && <small>({position})</small>}
+            </button>;
+          })}
+        </div>
+        {thresholdError && <p className="threshold-error" role="status">{thresholdError}</p>}
       </section>
       <div className="charts">
       <ChartCard title="Oxygen demand" icon="oxygen" color="var(--red)" number={round(data[state.oxygenUnit],state.oxygenUnit==='absolute'?2:1)} suffix={oxygenUnits[state.oxygenUnit]}

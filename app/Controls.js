@@ -1,6 +1,6 @@
 'use client';
-import {useEffect, useState} from 'react';
-import {LIMITS, MILE, RUN_UNITS, BIKE_UNITS, formatIntensity, parseIntensity, estimate, thresholdIntensity} from '../lib/model';
+import {useState} from 'react';
+import {MILE, RUN_UNITS, BIKE_UNITS, formatIntensity, parseGraphIntensity, convertThreshold, thresholdBounds} from '../lib/model';
 
 export function Icon({name, size=17}) {
   const paths = {
@@ -19,42 +19,67 @@ export function Icon({name, size=17}) {
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-export function Field({label, value, display, onCommit, suffix, hint, parse=Number, min, max, type='number'}) {
+export function Field({label, value, display, onCommit, suffix, hint, parse=Number, min, max, type='number', inputId}) {
   const shown = display ?? String(value);
-  const [draft,setDraft] = useState(shown), [error,setError] = useState('');
-  useEffect(()=>{setDraft(shown);setError('');},[shown]);
-  function commit() {
-    if(draft === shown) {setError('');return;}
-    const v = parse(draft);
-    if(!draft.trim() || !Number.isFinite(v) || v < min || v > max) {
-      setError(hint || ('Use '+min+'–'+max+'.'));return;
+  const [draft, setDraft] = useState(null);
+  const [error, setError] = useState('');
+  function edit(raw) {
+    setDraft(raw);
+    const parsed = parse(raw);
+    if (!raw.trim() || !Number.isFinite(parsed) || parsed < min || parsed > max) {
+      setError(hint || ('Use '+min+'–'+max+'.'));
+      return;
     }
-    setError('');onCommit(v);
+    setError('');
+    if (parsed !== value) onCommit(parsed);
+  }
+  function finish() {
+    setDraft(null);
+    setError('');
   }
   return <label className="field"><span>{label}</span><span className={'inputbox'+(error?' invalid':'')}>
-    <input type={type} step="any" min={type==='number'?min:undefined} max={type==='number'?max:undefined}
-      inputMode={type==='number'?'decimal':'text'} value={draft} onChange={e=>setDraft(e.target.value)}
-      onBlur={commit} onKeyDown={e=>{if(e.key==='Enter') e.currentTarget.blur();}} aria-invalid={!!error} />
+    <input id={inputId} type={type} step="any" min={type==='number'?min:undefined} max={type==='number'?max:undefined}
+      inputMode={type==='number'?'decimal':'text'} value={draft ?? shown} onChange={e=>edit(e.target.value)}
+      onBlur={finish} onKeyDown={e=>{if(e.key==='Enter') e.currentTarget.blur();}} aria-invalid={!!error} />
     {suffix && <small>{suffix}</small>}</span>{error && <em role="alert">{error}</em>}</label>;
 }
 
 function Threshold({which, sport, profile, weight, update}) {
-  const t = profile[which], label = which.toUpperCase(), old = thresholdIntensity(sport,profile,weight,t);
-  const unitText = (sport === 'run' ? RUN_UNITS : BIKE_UNITS)[profile.unit];
-  function changeMode(mode) {
-    const demands = estimate(sport,profile,weight,old);
-    let value = mode==='workload'? old : mode==='relative'?demands.relative:demands.percent;
-    const [lo,hi] = mode==='workload'?LIMITS[sport]:mode==='relative'?[5,110]:[10,99];
-    update({[which]:{mode,value:Math.max(lo,Math.min(hi,Math.round(value*100)/100))}});
+  const t = profile[which], label = which.toUpperCase();
+  const units = sport === 'run' ? RUN_UNITS : BIKE_UNITS;
+  const byLoad = t.mode === 'workload';
+  const method = byLoad ? t.unit || profile.unit : t.mode;
+  const [pending, setPending] = useState(null);
+  const chosen = pending ?? method;
+  const isWorkload = Object.hasOwn(units, chosen);
+  const mode = isWorkload ? 'workload' : chosen;
+  const [min, max] = thresholdBounds(mode, sport);
+  const unit = isWorkload ? units[chosen] : chosen === 'percent' ? '%' : 'mL/kg/min';
+  const format = n => isWorkload ? formatIntensity(n, chosen, weight) : String(Number(n.toFixed(2)));
+  function changeMethod(next) {
+    const converted = convertThreshold(sport, profile, weight, t, next);
+    const [lo, hi] = thresholdBounds(converted.mode, sport);
+    // Keep the previous threshold until the athlete enters a representable replacement.
+    if (converted.value < lo || converted.value > hi) { setPending(next); return; }
+    setPending(null);
+    update({[which]:converted});
   }
-  const byLoad=t.mode==='workload';
-  return <div className="threshold"><label>{label} input<select value={t.mode} onChange={e=>changeMode(e.target.value)}>
-    <option value="percent">% of VO₂max</option><option value="relative">Threshold VO₂</option><option value="workload">{sport==='run'?'Pace / speed':'Power'}</option></select></label>
-    <Field label={label+' value'} value={t.value} display={byLoad?formatIntensity(t.value,profile.unit,weight):undefined}
-      type={byLoad?'text':'number'} suffix={byLoad?unitText:t.mode==='percent'?'%':'mL/kg/min'} min={byLoad?LIMITS[sport][0]:t.mode==='percent'?10:5}
-      max={byLoad?LIMITS[sport][1]:t.mode==='percent'?99:110} parse={byLoad?v=>parseIntensity(v,profile.unit,weight):Number}
-      hint={byLoad?'Enter a value within the intensity range.':undefined}
-      onCommit={value=>update({[which]:{...t,value}})}/></div>;
+  function commit(value) {
+    setPending(null);
+    update({[which]:isWorkload ? {mode,unit:chosen,value} : {mode,value}});
+  }
+  const options = sport === 'run' ? {paceKm:'Pace · min/km',paceMi:'Pace · min/mi',kmh:'Speed · km/h',mph:'Speed · mph'}
+    : {watts:'Power · watts', wattsKg:'Power · W/kg'};
+  const limits = 'Enter '+format(min)+' to '+format(max)+' '+unit+'.';
+  return <div className="threshold"><label>{label} input<select value={chosen} onChange={e=>changeMethod(e.target.value)}>
+    <option value="percent">% of VO₂max</option>
+    {Object.entries(options).map(([key,name])=><option key={key} value={key}>{name}</option>)}
+    <option value="relative">Threshold VO₂</option></select></label>
+    <Field key={chosen} inputId={which+'-value'} label={label+' value'} value={pending ? null : t.value}
+      display={pending ? '' : format(t.value)} type={isWorkload?'text':'number'} suffix={unit} min={min} max={max}
+      parse={isWorkload?v=>parseGraphIntensity(v,chosen,weight,sport):Number} hint={limits} onCommit={commit}/>
+    {pending && <p>{limits} Your previous marker applies until then.</p>}
+  </div>;
 }
 
 export function Settings({sport,profile,weight,update,updateWeight,onNotes}) {
@@ -69,10 +94,10 @@ export function Settings({sport,profile,weight,update,updateWeight,onNotes}) {
       <hr/><h3>Session</h3>
       {running && <div className="mini-switch" aria-label="Session basis">{[['time','By time'],['distance','By distance']].map(([key,text])=>
         <button key={key} aria-pressed={profile.sessionMode===key} onClick={()=>update({sessionMode:key})}>{text}</button>)}</div>}
-      {byDistance?<Field label="Distance" value={profile.distanceKm} display={String(Number((profile.distanceKm/(miles?MILE:1)).toFixed(3)))}
+      {byDistance?<Field key={miles?'mi':'km'} label="Distance" value={profile.distanceKm} display={String(Number((profile.distanceKm/(miles?MILE:1)).toFixed(3)))}
         min={0.1} max={500} suffix={miles?'mi':'km'} parse={v=>Number(v)*(miles?MILE:1)} hint={miles?'Use 0.063–310.68 mi.':undefined} onCommit={distanceKm=>update({distanceKm})}/>
-        :<Field label="Duration" value={profile.minutes} min={1} max={1440} suffix="min" onCommit={minutes=>update({minutes})}/>}
-      <details><summary>Thresholds <Icon name="chevron" size={15}/></summary>
+        :<Field key="time" label="Duration" value={profile.minutes} min={1} max={1440} suffix="min" onCommit={minutes=>update({minutes})}/>}
+      <details id="threshold-settings"><summary>LT1 &amp; LT2 thresholds <Icon name="chevron" size={15}/></summary>
         <p>Defaults use 70% and 85% of VO₂max. Enter test values when available.</p>
         <Threshold which="lt1" {...{sport,profile,weight,update}}/><Threshold which="lt2" {...{sport,profile,weight,update}}/>
       </details>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimate, initialState, formatIntensity, parseIntensity, thresholdIntensity, restore, MILE } from '../lib/model.js';
+import { estimate, initialState, formatIntensity, parseIntensity, thresholdIntensity, convertThreshold, parseGraphIntensity, LIMITS, restore, MILE } from '../lib/model.js';
 const initial=initialState();
 const near=(actual,expected)=>assert.ok(Math.abs(actual-expected)<1e-8,actual+' vs '+expected);
 test('running gross energy includes rest and scales with weight',()=>{
@@ -35,4 +35,43 @@ test('restore rejects corrupt input and keeps sport-specific settings',()=>{
  const valid={...initial,weight:74,bike:{...initial.bike,efficiency:25},sport:'bike'};
  assert.deepEqual(restore(valid),valid);
  assert.deepEqual(restore({weight:0,run:{intensity:-2,lt1:{mode:'workload',value:-4}}}),initial);
+});
+
+test('percentage thresholds move with the percentage and the sport-specific VO₂max', () => {
+  for (const sport of ['run', 'bike']) {
+    const p = initial[sport];
+    const workload = (profile, value) => thresholdIntensity(sport, profile, 70, {mode:'percent',value});
+    const lower = workload(p, 70);
+    const higher = workload(p, 78);
+    assert.ok(higher > lower);
+    near(estimate(sport,p,70,higher).percent,78);
+    assert.ok(workload({...p,max:60},78)>higher);
+  }
+});
+
+test('direct running pace and cycling watts retain the physical threshold across unit changes and reload', () => {
+  for (const [sport,unit,entry,alternate] of [['run','paceKm','5:45','mph'],['bike','watts','200','wattsKg']]) {
+    const value = parseIntensity(entry,unit,70);
+    const profile = {...initial[sport],unit:alternate,lt1:{mode:'workload',unit,value}};
+    const saved = restore({...initial,[sport]:profile})[sport];
+    assert.deepEqual(saved.lt1,profile.lt1);
+    near(thresholdIntensity(sport,{...saved,max:65},84,saved.lt1),value);
+    near(convertThreshold(sport,saved,70,saved.lt1,alternate).value,value);
+    const percent = convertThreshold(sport,saved,70,saved.lt1,'percent');
+    near(thresholdIntensity(sport,saved,70,percent),value);
+    const legacy = restore({...initial,[sport]:{...profile,lt1:{mode:'workload',value}}})[sport];
+    assert.equal(legacy.lt1.unit,alternate);
+  }
+});
+
+test('displayed range endpoints work with imperial units and W/kg', () => {
+  for (const [sport,unit,weight] of [['bike','wattsKg',70],['run','mph',70],['run','paceMi',70]]) {
+    for (const endpoint of LIMITS[sport]) {
+      const display = formatIntensity(endpoint,unit,weight);
+      const parsed = parseGraphIntensity(display,unit,weight,sport);
+      assert.ok(parsed >= LIMITS[sport][0] && parsed <= LIMITS[sport][1]);
+      assert.equal(formatIntensity(parsed,unit,weight),display);
+    }
+  }
+  assert.ok(parseGraphIntensity('0.50','wattsKg',70,'bike') < 50);
 });

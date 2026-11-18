@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useId, useRef, useState } from 'react';
-import { clamp, formatIntensity, LIMITS } from '../lib/model';
+import { clamp, formatIntensity, LIMITS, RUN_UNITS, BIKE_UNITS } from '../lib/model';
 
 function tickStep(max, count) {
   const rough = max / count;
@@ -14,14 +14,14 @@ export default function Plot({ sport, weight, profile, measure, unit, color, thr
   const [width, setWidth] = useState(660);
   const id = useId().replaceAll(':','');
   useEffect(() => {
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(245, entry.contentRect.width)));
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(1, entry.contentRect.width)));
     observer.observe(container.current);
     return () => observer.disconnect();
   }, []);
   const [lo, hi] = LIMITS[sport];
   const left = width < 410 ? 39 : 48, right = width - 15, top = 28, bottom = 141;
   const x = (v) => left + (v - lo) / (hi - lo) * (right - left);
-  const maxY = Math.max(measure(hi), measure(lo), 1);
+  const maxY = Math.max(measure(hi), measure(lo), oxygenMax || 0, 1);
   const step = tickStep(maxY, 4);
   const ceiling = Math.ceil(maxY / step) * step;
   const y = (v) => bottom - v / ceiling * (bottom - top);
@@ -31,11 +31,14 @@ export default function Plot({ sport, weight, profile, measure, unit, color, thr
   const line = 'M' + x(lo) + ' ' + y(measure(lo)) + ' L' + x(hi) + ' ' + y(measure(hi));
   const active = profile.intensity;
   const select = (event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const v = lo + ((event.clientX - rect.left) - left) / (right-left) * (hi-lo);
+    const matrix = event.currentTarget.getScreenCTM();
+    if (!matrix || right <= left) return;
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
+    const v = lo + (point.x - left) / (right-left) * (hi-lo);
     onSelect(clamp(sport === 'bike' ? Math.round(v) : Math.round(v * 100) / 100,lo,hi));
   };
   const markers = thresholds.filter(t => t.value >= lo && t.value <= hi);
+  const closeMarkers = markers.length === 2 && Math.abs(x(markers[1].value) - x(markers[0].value)) < 32;
   return <div ref={container} className="plot"><svg viewBox={'0 0 '+width+' 171'} width="100%" height="171" role="img"
     aria-label={unit+' by '+(sport === 'run'?'running pace or speed':'cycling power')+'. Use the intensity slider to adjust.'}
     onPointerDown={e=>{if(e.button!==0)return; e.currentTarget.setPointerCapture(e.pointerId); select(e);}}
@@ -46,10 +49,15 @@ export default function Plot({ sport, weight, profile, measure, unit, color, thr
     {horizontal.map(v=><g key={v}><line x1={left} x2={right} y1={y(v)} y2={y(v)} className="grid"/>
       <text x={left-9} y={y(v)+4} textAnchor="end">{Number(v.toFixed(2)).toLocaleString('en')}</text></g>)}
     <path d={line+' L'+right+' '+bottom+' L'+left+' '+bottom+' Z'} fill={'url(#fill'+id+')'} />
-    {oxygenMax > 0 && oxygenMax < ceiling && <line x1={left} x2={right} y1={y(oxygenMax)} y2={y(oxygenMax)} className="max-line"><title>VO₂max</title></line>}
+    {oxygenMax > 0 && oxygenMax <= ceiling && <line x1={left} x2={right} y1={y(oxygenMax)} y2={y(oxygenMax)} className="max-line"><title>VO₂max</title></line>}
     {markers.map((t,i)=><g key={t.label}><line x1={x(t.value)} x2={x(t.value)} y1={top-5} y2={bottom} className="marker-line"/>
-      <text x={x(t.value)} y={i===1 && x(t.value)-x(markers[0].value)<32 ? 24 : 14} textAnchor="middle" className="marker-label">{t.label}</text></g>)}
+      <text x={x(t.value)} y={i===1 && closeMarkers ? 24 : 14} textAnchor="middle" className="marker-label">{t.label}</text></g>)}
     <path d={line} stroke={color} strokeWidth="2.8" fill="none" strokeLinecap="round"/>
+    {markers.map(t=><rect key={t.label} x={x(t.value)-2.6} y={y(measure(t.value))-2.6}
+      width="5.2" height="5.2" fill="white" stroke={color} strokeWidth="1.5"
+      transform={'rotate(45 '+x(t.value)+' '+y(measure(t.value))+')'}>
+      <title>{[t.label, formatIntensity(t.value,profile.unit,weight), (sport === 'run' ? RUN_UNITS : BIKE_UNITS)[profile.unit]].join(' ')}</title>
+    </rect>)}
     {pinned != null && <circle cx={x(pinned)} cy={y(measure(pinned))} r="5" fill="white" stroke={color} strokeWidth="2"/>}
     <line x1={x(active)} x2={x(active)} y1={y(measure(active))} y2={bottom} stroke={color} strokeWidth="1.2"/>
     <circle cx={x(active)} cy={y(measure(active))} r="7" fill="white" stroke={color} strokeWidth="2.2"/>
